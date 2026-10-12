@@ -17,6 +17,7 @@ import type {
   ConflictRecord,
   Obstacle,
   Robot,
+  RobotStatus,
   ScenarioNarrative,
   SimEvent,
   Snapshot,
@@ -37,6 +38,10 @@ const MAX_SUBSTEPS = 240;
 export const SAFE_GAP = 1.35;
 /** Even a robot with right of way stops this close to an oncoming AMR. */
 const HARD_GAP = 0.95;
+/** Slowest a robot rolls while easing off for traffic; it never fully waits above HARD_GAP. */
+const CREEP = 0.3;
+/** How often a slowed robot retries a detour, in seconds. */
+const RETRY_EVERY = 0.3;
 /** Safety margin on the estimated battery cost of a trip. */
 const TRIP_BATTERY_MARGIN = 1.2;
 
@@ -86,6 +91,8 @@ export class Simulation {
   private waitingFor = new Map<string, string>();
   /** Drive-through count per cell, for the traffic heat map. */
   private visits = new Map<string, number>();
+  /** Seconds each AMR has been held inside HARD_GAP, to escalate to a back-off. */
+  private stuckTime = new Map<string, number>();
   version = 0;
 
   constructor() {
@@ -120,6 +127,7 @@ export class Simulation {
       lastEvent: "Standing by",
       holdingFor: null,
       sensing: false,
+      throttle: 1,
     };
   }
 
@@ -135,6 +143,7 @@ export class Simulation {
     this.handleTimers.clear();
     this.waitingFor.clear();
     this.visits.clear();
+    this.stuckTime.clear();
     this.accumulator = 0;
     this.scripts = [];
     this.allocTimer = 0;
@@ -729,21 +738,20 @@ export class Simulation {
     }
   }
 
-  private replan(r: Robot, reason: string, extraBlock?: Vec2) {
-    if (!r.dest) return;
+  private replan(r: Robot, reason: string, extraBlock?: Vec2): boolean {
+    if (!r.dest) return false;
     const before = r.path.length;
     const start = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
     const path = aStar(start, r.dest, this.dynamicBlocks(r, extraBlock));
     if (path.length === 0) {
-      r.lastEvent = `Blocked (${reason}) — waiting`;
-      r.status = "waiting";
-      return;
+      r.lastEvent = `No detour yet (${reason}) — easing off`;
+      return false;
     }
     r.path = path;
     r.pathIndex = 0;
     r.reroutes += 1;
     r.lastEvent = `Rerouted (${reason})`;
-    if (r.status === "waiting" || r.status === "avoiding") {
+    if (r.status === "waiting" || r.status === "avoiding" || r.status === "yielding") {
       r.status = r.carrying ? "to_dropoff" : "to_pickup";
     }
     this.log(
@@ -751,6 +759,7 @@ export class Simulation {
       `${r.name} rerouted around ${reason}: ${before} → ${path.length} cells`,
     );
     this.version++;
+    return true;
   }
 
   private pathHitsBlock(r: Robot) {
@@ -1031,6 +1040,7 @@ export class Simulation {
       o.status !== "failed" &&
       o.status !== "waiting" &&
       o.status !== "idle" &&
+      o.throttle > 0 &&
       !this.handleTimers.has(o.id) &&
       o.pathIndex < o.path.length
     );
@@ -1051,18 +1061,97 @@ export class Simulation {
       const d = Math.hypot(ox, oy);
       if (d >= bestD) continue;
       const cosAngle = d < 0.3 ? 1 : (ox * hx + oy * hy) / (d * hl);
-      if (cosAngle <= 0.3) continue;
+      if (cosAngle <= 0.15) continue;
       best = o;
       bestD = d;
     }
     return best;
   }
 
+  /** True when stepping toward `next` takes `r` further from `other` (an escape move). */
+  private movingAway(r: Robot, next: Vec2, other: Robot): boolean {
+    const hx = next.x - r.pos.x;
+    const hy = next.y - r.pos.y;
+    const ox = other.pos.x - r.pos.x;
+    const oy = other.pos.y - r.pos.y;
+    return hx * ox + hy * oy < 0;
+  }
+
+  /** Another active AMR inside HARD_GAP that lies in the direction `r` is about to move. */
+  private robotTouching(r: Robot, next: Vec2): Robot | null {
+    const hx = next.x - r.pos.x;
+    const hy = next.y - r.pos.y;
+    const hl = Math.hypot(hx, hy) || 1;
+    for (const o of this.robots) {
+      if (o.id === r.id || o.status === "failed") continue;
+      const ox = o.pos.x - r.pos.x;
+      const oy = o.pos.y - r.pos.y;
+      const d = Math.hypot(ox, oy);
+      if (d >= HARD_GAP) continue;
+      // Moving sideways or away from it is fine; only a move toward it is blocked.
+      if ((ox * hx + oy * hy) / (d * hl || 1) < 0.35) continue;
+      return o;
+    }
+    return null;
+  }
+
   /**
-   * Keeps AMRs from driving through each other. Returns true when `r` must hold
-   * this tick. Oncoming robots resolve by priority: the lower one sidesteps.
+   * Reverse one cell away from `other` so a jam can clear, then continue to the
+   * destination from there. Returns false if no free cell leads away.
    */
-  private holdForRobotAhead(r: Robot, ahead: Robot, dt: number): boolean {
+  private backOff(r: Robot, other: Robot): boolean {
+    if (!r.dest) return false;
+    const here = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
+    const otherCell = { x: Math.round(other.pos.x), y: Math.round(other.pos.y) };
+    const blocks = this.dynamicBlocks(r, otherCell);
+    for (const o of this.robots) {
+      if (o.id !== r.id) blocks.add(key(Math.round(o.pos.x), Math.round(o.pos.y)));
+    }
+    const curD = Math.hypot(other.pos.x - r.pos.x, other.pos.y - r.pos.y);
+    let best: Vec2 | null = null;
+    let bestD = curD + 0.3;
+    const options: Vec2[] = [
+      { x: here.x + 1, y: here.y },
+      { x: here.x - 1, y: here.y },
+      { x: here.x, y: here.y + 1 },
+      { x: here.x, y: here.y - 1 },
+    ];
+    for (const c of options) {
+      if (!inBounds(c.x, c.y) || isRack(c.x, c.y) || blocks.has(key(c.x, c.y))) continue;
+      const d = Math.hypot(other.pos.x - c.x, other.pos.y - c.y);
+      if (d > bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    if (!best) return false;
+    let onward = aStar(best, r.dest, this.dynamicBlocks(r, otherCell));
+    if (onward.length === 0) onward = aStar(best, r.dest, this.dynamicBlocks(r));
+    const atDest = best.x === r.dest.x && best.y === r.dest.y;
+    if (onward.length === 0 && !atDest) return false;
+    r.path = [best, ...onward];
+    r.pathIndex = 0;
+    r.reroutes += 1;
+    r.lastEvent = `Backing off from ${other.name}`;
+    this.log("reroute", `${r.name} backed off one cell to let ${other.name} through`);
+    this.version++;
+    return true;
+  }
+
+  /** Throttle for a gap to the robot ahead: full speed at SAFE_GAP, CREEP at HARD_GAP, 0 inside it. */
+  private throttleForGap(gap: number): number {
+    if (gap < HARD_GAP) return 0;
+    const t = (gap - HARD_GAP) / (SAFE_GAP - HARD_GAP);
+    return Math.max(CREEP, Math.min(1, t));
+  }
+
+  /**
+   * Keeps AMRs from driving through each other without stopping. Returns the
+   * speed factor for this tick. Oncoming robots resolve by priority: the lower
+   * one takes a side path at once; the follower behind a stopped robot detours
+   * at once. Only a robot inside HARD_GAP comes to an actual halt.
+   */
+  private followRobotAhead(r: Robot, ahead: Robot, dt: number): number {
     const aheadMoving = this.isMoving(ahead);
     const aheadNext = ahead.path[ahead.pathIndex];
     const headOn =
@@ -1072,37 +1161,47 @@ export class Simulation {
         (aheadNext.y - ahead.pos.y) * (r.pos.y - ahead.pos.y) >
         0;
     const gap = Math.hypot(ahead.pos.x - r.pos.x, ahead.pos.y - r.pos.y);
-    if (headOn && gap >= HARD_GAP && this.priority(r) > this.priority(ahead)) return false;
+    const base = this.throttleForGap(gap);
 
-    // A robot on its way to dock keeps its charging state while it holds.
-    if (r.status !== "charging") r.status = "waiting";
-    r.waitTimer += dt;
-    r.lastEvent = `Holding for ${ahead.name}`;
     this.waitingFor.set(r.id, ahead.id);
     r.holdingFor = ahead.id;
-
+    r.waitTimer += dt;
+    const retry = r.waitTimer >= RETRY_EVERY;
+    if (retry) r.waitTimer = 0;
     const aheadCell = { x: Math.round(ahead.pos.x), y: Math.round(ahead.pos.y) };
+
     const ring = this.waitRing(r);
     if (ring && ring.every((o) => o.id === r.id || this.priority(o) > this.priority(r))) {
-      // Everyone in the ring is waiting on someone else: the lowest priority AMR backs off.
-      r.waitTimer = 0;
-      this.log("conflict", `${r.name} breaking a traffic deadlock with ${ahead.name}`);
-      if (!this.takeSidePath(r, ahead)) this.replan(r, "traffic deadlock", aheadCell);
-      return true;
+      // Everyone in the ring is easing off for someone else: the lowest priority AMR backs out.
+      if (retry) {
+        this.log("conflict", `${r.name} breaking a traffic deadlock with ${ahead.name}`);
+        if (this.takeSidePath(r, ahead) || this.replan(r, "traffic deadlock", aheadCell)) return 0;
+      }
+      return Math.max(base, CREEP);
+    }
+
+    if (headOn) {
+      if (this.priority(r) > this.priority(ahead)) {
+        r.lastEvent = `Right of way over ${ahead.name} — easing off`;
+        return Math.max(base, 0.6);
+      }
+      r.lastEvent = `Giving way to ${ahead.name}`;
+      if (r.status !== "avoiding" && this.takeSidePath(r, ahead)) return 0;
+      return base;
     }
 
     if (!aheadMoving) {
       if (ahead.status === "idle" && ahead.taskId === null && !this.handleTimers.has(ahead.id)) {
         this.parkAtCharger(ahead, aheadCell);
-      } else if (r.waitTimer > 1) {
-        r.waitTimer = 0;
-        this.replan(r, `${ahead.name} stopped ahead`, aheadCell);
+      } else if (retry && this.replan(r, `${ahead.name} stopped ahead`, aheadCell)) {
+        return 0;
       }
-    } else if (headOn && r.waitTimer > 1.2) {
-      r.waitTimer = 0;
-      this.takeSidePath(r, ahead);
+      r.lastEvent = `${ahead.name} stopped ahead — creeping`;
+      return base;
     }
-    return true;
+
+    r.lastEvent = `Following ${ahead.name}`;
+    return base;
   }
 
   /** The AMRs in a circular wait that includes `r`, or null if there is none. */
@@ -1157,20 +1256,67 @@ export class Simulation {
       return;
     }
 
-    // LiDAR-style forward check for dynamic obstacles.
-    if (this.obstacleAt(next, 0.75)) {
+    // Physically too close: stop this instant; the lower priority AMR slips out sideways.
+    const touching = this.robotTouching(r, next);
+    if (touching) {
       r.sensing = true;
-      r.status = "avoiding";
+      r.throttle = 0;
+      this.waitingFor.set(r.id, touching.id);
+      r.holdingFor = touching.id;
+      r.lastEvent = `${touching.name} too close — holding`;
+      if (r.status !== "charging" && r.status !== "avoiding") r.status = "waiting";
       r.waitTimer += dt;
-      r.lastEvent = `Obstacle ahead at ${cellName(next)} — avoiding`;
-      if (r.waitTimer > 0.6) {
+      const stuck = (this.stuckTime.get(r.id) ?? 0) + dt;
+      this.stuckTime.set(r.id, stuck);
+      if (r.waitTimer >= RETRY_EVERY) {
         r.waitTimer = 0;
-        this.replan(r, "dynamic obstacle");
+        const cell = { x: Math.round(touching.pos.x), y: Math.round(touching.pos.y) };
+        const lower = this.priority(r) <= this.priority(touching);
+        const reason = `${touching.name} too close`;
+        if (lower) {
+          // Side-step first; if that keeps failing, reverse a cell and go around.
+          if (stuck > 0.6) {
+            if (!this.backOff(r, touching) && !this.takeSidePath(r, touching)) {
+              this.replan(r, reason, cell);
+            }
+          } else if (!this.takeSidePath(r, touching) && !this.backOff(r, touching)) {
+            this.replan(r, reason, cell);
+          }
+        } else if (!this.replan(r, reason, cell) && stuck > 1.2) {
+          this.backOff(r, touching);
+        }
       }
       return;
     }
+    this.stuckTime.set(r.id, 0);
 
-    const blocker = this.conflictFor(r, next);
+    let throttle = 1;
+    let easing: RobotStatus | null = null;
+
+    // LiDAR-style forward check for dynamic obstacles: ease off and detour at once.
+    if (this.obstacleAt(next, 0.75)) {
+      r.sensing = true;
+      r.waitTimer += dt;
+      r.lastEvent = `Obstacle ahead at ${cellName(next)} — avoiding`;
+      if (r.waitTimer >= RETRY_EVERY) {
+        r.waitTimer = 0;
+        if (this.replan(r, "dynamic obstacle")) {
+          r.status = "avoiding";
+          return;
+        }
+      }
+      const gap = Math.hypot(next.x - r.pos.x, next.y - r.pos.y);
+      if (gap < 0.45) {
+        r.status = "avoiding";
+        return;
+      }
+      throttle = Math.min(throttle, CREEP);
+      easing = "avoiding";
+    }
+
+    const candidate = this.conflictFor(r, next);
+    // An escape move away from the other robot is never held up.
+    const blocker = candidate && !this.movingAway(r, next, candidate) ? candidate : null;
     if (blocker) {
       const myPriority = this.priority(r);
       const otherPriority = this.priority(blocker);
@@ -1185,60 +1331,85 @@ export class Simulation {
             this.takeSidePath(blocker, r);
           }
 
-          // If blocker is still physically on my next cell, pause briefly
+          // If blocker is still physically on my next cell, ease off until it clears
           const blockerCell = { x: Math.round(blocker.pos.x), y: Math.round(blocker.pos.y) };
           if (blockerCell.x === next.x && blockerCell.y === next.y) {
-            r.status = "waiting";
-            r.waitTimer += dt;
-            r.lastEvent = `Waiting for ${blocker.name} to vacate corridor`;
+            const gap = Math.hypot(blocker.pos.x - r.pos.x, blocker.pos.y - r.pos.y);
+            r.lastEvent = `Easing off while ${blocker.name} clears the corridor`;
             this.waitingFor.set(r.id, blocker.id);
             r.holdingFor = blocker.id;
             r.sensing = true;
-            return;
+            const t = this.throttleForGap(gap);
+            if (t <= 0) {
+              r.status = "waiting";
+              r.waitTimer += dt;
+              return;
+            }
+            throttle = Math.min(throttle, t);
+            easing = "yielding";
           }
           // Lane is clear or blocker is stepping aside: continue forward!
         } else {
-          // Low priority robot (yielding robot)
+          // Low priority robot takes the side path immediately and keeps rolling
           this.noteConflict(r, blocker, next);
-          r.status = "avoiding";
-          r.waitTimer += dt;
-          this.takeSidePath(r, blocker);
-          return;
+          r.sensing = true;
+          if (r.status !== "avoiding" && this.takeSidePath(r, blocker)) return;
+          throttle = Math.min(throttle, CREEP);
+          easing = "avoiding";
         }
       } else {
         // In other scenarios, courtesy yielding without false-alarm Collision Red Zones
         if (myPriority < otherPriority) {
-          r.status = "waiting";
           r.waitTimer += dt;
-          r.lastEvent = `Holding for ${blocker.name}`;
+          r.lastEvent = `Giving way to ${blocker.name}`;
           this.waitingFor.set(r.id, blocker.id);
           r.holdingFor = blocker.id;
           r.sensing = true;
-          if (r.waitTimer > 1.5) {
+          const blockerCell = { x: Math.round(blocker.pos.x), y: Math.round(blocker.pos.y) };
+          if (r.waitTimer >= RETRY_EVERY) {
             r.waitTimer = 0;
-            this.replan(r, "traffic clearance");
+            if (this.replan(r, `${blocker.name} crossing`, blockerCell)) return;
           }
-          return;
+          const gap = Math.hypot(blocker.pos.x - r.pos.x, blocker.pos.y - r.pos.y);
+          const t = this.throttleForGap(gap);
+          if (t <= 0) {
+            r.status = "waiting";
+            return;
+          }
+          throttle = Math.min(throttle, t);
+          easing = "yielding";
         }
       }
     }
 
-    if (this.scenario !== 4) {
-      const ahead = this.robotAhead(r, next);
-      if (ahead) {
-        r.sensing = true;
-        if (this.holdForRobotAhead(r, ahead, dt)) return;
+    const ahead = this.scenario !== 4 ? this.robotAhead(r, next) : null;
+    if (ahead) {
+      r.sensing = true;
+      const t = this.followRobotAhead(r, ahead, dt);
+      if (t <= 0) {
+        // Either a new route was just planned (move next tick) or we are touching.
+        if (r.status !== "charging" && r.status !== "avoiding") r.status = "waiting";
+        return;
       }
+      throttle = Math.min(throttle, t);
+      easing = easing ?? "yielding";
     }
-    this.waitingFor.delete(r.id);
-    r.holdingFor = null;
 
-    if (r.waitTimer > 0) {
-      r.waitTimer = 0;
-      this.resolveConflicts(r);
-    }
-    if (r.status === "waiting" || r.status === "avoiding") {
-      r.status = r.carrying ? "to_dropoff" : "to_pickup";
+    r.throttle = throttle;
+    if (easing === null) {
+      if (!ahead) {
+        this.waitingFor.delete(r.id);
+        r.holdingFor = null;
+      }
+      if (r.waitTimer > 0) {
+        r.waitTimer = 0;
+        this.resolveConflicts(r);
+      }
+      if (r.status === "waiting" || r.status === "avoiding" || r.status === "yielding") {
+        r.status = r.carrying ? "to_dropoff" : "to_pickup";
+      }
+    } else if (r.status !== "charging") {
+      r.status = easing;
     }
 
     const dx = next.x - r.pos.x;
@@ -1259,7 +1430,7 @@ export class Simulation {
     r.yaw = lerpAngle(r.yaw, targetYaw, 1 - Math.exp(-9 * dt));
     const yawDelta = Math.atan2(Math.sin(r.yaw - prevYaw), Math.cos(r.yaw - prevYaw));
 
-    const stepLen = Math.min(r.speed * dt, dist);
+    const stepLen = Math.min(r.speed * throttle * dt, dist);
     r.pos.x += (dx / dist) * stepLen;
     r.pos.y += (dy / dist) * stepLen;
     r.distance += stepLen;

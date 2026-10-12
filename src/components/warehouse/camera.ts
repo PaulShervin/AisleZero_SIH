@@ -3,9 +3,10 @@ import type { OrbitControls } from "@react-three/drei";
 import { gridToWorld, type Vec2 } from "@/sim/grid";
 import { useSimStore } from "@/sim/store";
 
-export const CAMERA_POSITION: [number, number, number] = [0, 36, 46];
+/** Elevated three-quarter view from the shipping corner, looking across the racks. */
+export const CAMERA_POSITION: [number, number, number] = [36, 19, 42];
 export const CAMERA_FOV = 46;
-export const CAMERA_TARGET: [number, number, number] = [0, 1, 0];
+export const CAMERA_TARGET: [number, number, number] = [-3, 0.5, -3];
 
 /** Offset from the target when flying to a cell: close, from the south. */
 const FLY_OFFSET: [number, number, number] = [0, 13, 15];

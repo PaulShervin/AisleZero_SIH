@@ -57,7 +57,10 @@ export function AmrHud() {
         <dt className="text-white/60">Waypoints</dt>
         <dd className="tabular-nums">{left}</dd>
         <dt className="text-white/60">Speed</dt>
-        <dd className="tabular-nums">{robot.speed.toFixed(1)} cells/s</dd>
+        <dd className="tabular-nums">
+          {(robot.speed * robot.throttle).toFixed(1)} cells/s
+          {robot.throttle < 1 && <span className="text-amber-300"> · easing off</span>}
+        </dd>
         <dt className="text-white/60">Travelled</dt>
         <dd className="tabular-nums">{robot.distance.toFixed(0)} cells</dd>
       </dl>

@@ -3,12 +3,12 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { ContactShadows, Environment, Lightformer, OrbitControls } from "@react-three/drei";
 import { getSim } from "@/sim/engine";
 import { useSimStore } from "@/sim/store";
-import { WAREHOUSE_DEPTH, WAREHOUSE_WIDTH } from "@/sim/grid";
 import { Warehouse } from "./Warehouse";
 import { Amr } from "./Amr";
 import { BlockedCells, ConflictMarkers, Obstacles, PathLines, SelectionRing } from "./Overlays";
 import { CAMERA_FOV, CAMERA_POSITION, CAMERA_TARGET, registerCameraControls } from "./camera";
 import { CameraRig } from "./CameraRig";
+import { BUILDING_D, BUILDING_W } from "./layout";
 import { YieldLinks } from "./YieldLinks";
 import { StationBadges } from "./StationBadges";
 import { HeatMap } from "./HeatMap";
@@ -39,24 +39,28 @@ export function SimCanvas() {
       camera={{ position: CAMERA_POSITION, fov: CAMERA_FOV }}
       gl={{ antialias: true }}
     >
-      <color attach="background" args={["#141820"]} />
-      <fog attach="fog" args={["#141820", 90, 240]} />
+      <color attach="background" args={["#171a1f"]} />
+      <fog attach="fog" args={["#171a1f", 120, 300]} />
 
-      <hemisphereLight args={["#cdd7e2", "#4a4d52", 0.55]} />
-      <ambientLight intensity={0.45} />
+      {/* Neutral daylight-balanced industrial lighting: soft sky fill plus one key light for shadows. */}
+      <hemisphereLight args={["#e3e9f0", "#5a5d61", 0.6]} />
+      <ambientLight intensity={0.32} />
       <directionalLight
-        position={[32, 48, 24]}
-        intensity={1.35}
+        position={[26, 42, 18]}
+        intensity={1.15}
+        color="#fff4e4"
         castShadow
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
-        shadow-camera-left={-48}
-        shadow-camera-right={48}
-        shadow-camera-top={42}
-        shadow-camera-bottom={-42}
-        shadow-bias={-0.0005}
+        shadow-camera-left={-BUILDING_W / 2}
+        shadow-camera-right={BUILDING_W / 2}
+        shadow-camera-top={BUILDING_D / 2}
+        shadow-camera-bottom={-BUILDING_D / 2}
+        shadow-camera-far={140}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.02}
       />
-      <directionalLight position={[-26, 28, -20]} intensity={0.45} color="#b9c6d6" />
+      <directionalLight position={[-30, 26, -22]} intensity={0.4} color="#c9d6e6" />
 
       <Environment>
         <Lightformer intensity={1.6} position={[0, 22, 0]} scale={[48, 36, 1]} />
@@ -92,10 +96,10 @@ export function SimCanvas() {
         <FocusMarker />
         <ContactShadows
           position={[0, 0.02, 0]}
-          scale={Math.max(WAREHOUSE_WIDTH, WAREHOUSE_DEPTH)}
-          opacity={0.4}
-          blur={2.4}
-          far={6}
+          scale={BUILDING_W}
+          opacity={0.45}
+          blur={2.2}
+          far={5}
           resolution={1024}
         />
       </Suspense>
@@ -108,7 +112,7 @@ export function SimCanvas() {
         enabled={cameraMode === "overview"}
         target={CAMERA_TARGET}
         minDistance={6}
-        maxDistance={145}
+        maxDistance={170}
         maxPolarAngle={Math.PI / 2.08}
         enableDamping
         dampingFactor={0.08}

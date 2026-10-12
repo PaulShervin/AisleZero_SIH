@@ -5,6 +5,7 @@ export type RobotStatus =
   | "to_pickup"
   | "to_dropoff"
   | "waiting"
+  | "yielding"
   | "avoiding"
   | "charging"
   | "failed";
@@ -37,6 +38,8 @@ export interface Robot {
   holdingFor: string | null;
   /** True while the forward sensor has something in its stopping distance. */
   sensing: boolean;
+  /** Current speed factor 0..1; below 1 the robot is easing off for traffic. */
+  throttle: number;
 }
 
 /** Why a task went to a particular robot, kept for the UI. */
