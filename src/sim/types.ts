@@ -33,6 +33,24 @@ export interface Robot {
   reroutes: number;
   conflicts: number;
   lastEvent: string;
+  /** Id of the AMR this one is currently holding for, if any. */
+  holdingFor: string | null;
+  /** True while the forward sensor has something in its stopping distance. */
+  sensing: boolean;
+}
+
+/** Why a task went to a particular robot, kept for the UI. */
+export interface AllocationDecision {
+  robotId: string;
+  score: number;
+  dist: number;
+  battery: number;
+  load: number;
+  urgency: number;
+  /** Runner-up scores so the choice can be compared. */
+  alternatives: Array<{ robotId: string; score: number }>;
+  /** Simulation time the decision was made. */
+  t: number;
 }
 
 export type TaskStatus = "pending" | "assigned" | "carrying" | "done";
@@ -48,6 +66,7 @@ export interface Task {
   assignedTo: string | null;
   reassignments: number;
   createdAt: number;
+  allocation: AllocationDecision | null;
 }
 
 export interface Obstacle {
@@ -75,6 +94,9 @@ export interface SimEvent {
   t: number;
   kind: EventKind;
   message: string;
+  /** Where it happened, when known, so the UI can jump to it. */
+  cell?: Vec2;
+  robotId?: string;
 }
 
 export interface ConflictRecord {
@@ -123,4 +145,6 @@ export interface Snapshot {
   events: SimEvent[];
   conflicts: ConflictRecord[];
   narrative: ScenarioNarrative;
+  /** Times each cell has been driven through, keyed "x,y". */
+  heat: Record<string, number>;
 }

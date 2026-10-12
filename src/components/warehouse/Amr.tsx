@@ -3,10 +3,18 @@ import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import { Text } from "@react-three/drei";
 import { CELL, GRID_H, GRID_W } from "@/sim/grid";
-import { getSim } from "@/sim/engine";
+import { SAFE_GAP, getSim } from "@/sim/engine";
+import { useSimStore } from "@/sim/store";
+import { amrColor } from "@/sim/palette";
+import { prefersReducedMotion } from "@/lib/motion";
+import { AmrTag } from "./AmrTag";
 
-const BODY_YELLOW = "#f2a417";
 const BODY_DARK = "#26292e";
+const LOW_BATTERY = 25;
+const SAFETY_RADIUS = SAFE_GAP * CELL;
+const RING_CLEAR = "#5ad1ff";
+const RING_NEAR = "#fbbf24";
+const RING_CLOSE = "#ef4444";
 
 function Wheel({
   position,
@@ -111,15 +119,22 @@ export function Amr({ index }: { index: number }) {
   const beacon = useRef<THREE.Mesh>(null);
   const crate = useRef<THREE.Group>(null);
   const scan = useRef<THREE.Mesh>(null);
+  const safety = useRef<THREE.Mesh>(null);
+  const body = useRef<THREE.Mesh>(null);
+  const reduced = useRef(prefersReducedMotion());
+  const color = amrColor(index);
 
-  useFrame(() => {
-    const r = getSim().robots[index];
+  useFrame(({ clock }) => {
+    const sim = getSim();
+    const r = sim.robots[index];
     const g = group.current;
     if (!r || !g) return;
+    const selected = useSimStore.getState().selected === r.id;
     const x = (r.pos.x - (GRID_W - 1) / 2) * CELL;
     const z = (r.pos.y - (GRID_H - 1) / 2) * CELL;
     g.position.set(x, 0, z);
-    g.rotation.y = r.yaw;
+    // Model front is local -Z; yaw is a heading measured clockwise from -Z on the map.
+    g.rotation.y = -r.yaw;
 
     // Correct local-axis rotation for each individual wheel
     const leftSpin = -(r.leftWheelSpin ?? r.wheelSpin);
@@ -132,8 +147,39 @@ export function Amr({ index }: { index: number }) {
     if (lidar.current) lidar.current.rotation.y = r.lidarSpin;
     if (scan.current) {
       scan.current.rotation.z = r.lidarSpin;
-      (scan.current.material as THREE.MeshBasicMaterial).opacity =
-        r.status === "failed" ? 0 : 0.12;
+      const mat = scan.current.material as THREE.MeshBasicMaterial;
+      mat.opacity = r.status === "failed" ? 0 : r.sensing ? 0.42 : selected ? 0.24 : 0.1;
+      mat.color.set(r.sensing ? "#ff8a5b" : "#5ad1ff");
+    }
+
+    // Safety envelope: colour by the nearest other AMR.
+    if (safety.current) {
+      let nearest = Infinity;
+      for (const o of sim.robots) {
+        if (o.id === r.id || o.status === "failed") continue;
+        nearest = Math.min(nearest, Math.hypot(o.pos.x - r.pos.x, o.pos.y - r.pos.y));
+      }
+      const mat = safety.current.material as THREE.MeshBasicMaterial;
+      const close = nearest < SAFE_GAP;
+      const near = nearest < SAFE_GAP * 2;
+      mat.color.set(close ? RING_CLOSE : near ? RING_NEAR : RING_CLEAR);
+      mat.opacity = r.status === "failed" ? 0 : close ? 0.75 : near ? 0.45 : selected ? 0.3 : 0.14;
+      safety.current.visible = r.status === "idle" ? selected : true;
+    }
+
+    // Low battery: body breathes amber (unless the viewer prefers reduced motion).
+    if (body.current) {
+      const mat = body.current.material as THREE.MeshStandardMaterial;
+      const low = r.battery <= LOW_BATTERY && r.status !== "charging" && r.status !== "failed";
+      if (low) {
+        const pulse = reduced.current
+          ? 0.6
+          : 0.35 + Math.abs(Math.sin(clock.elapsedTime * 3)) * 0.5;
+        mat.emissive.set("#f59e0b");
+        mat.emissiveIntensity = pulse;
+      } else if (mat.emissiveIntensity !== 0) {
+        mat.emissiveIntensity = 0;
+      }
     }
     if (crate.current) crate.current.visible = r.carrying;
     if (beacon.current) {
@@ -155,13 +201,38 @@ export function Amr({ index }: { index: number }) {
   });
 
   const label = `AMR-0${index + 1}`;
+  const id = `R${index + 1}`;
 
   return (
-    <group ref={group}>
+    <group
+      ref={group}
+      onClick={(e) => {
+        e.stopPropagation();
+        useSimStore.getState().select(id);
+      }}
+      onPointerOver={() => {
+        document.body.style.cursor = "pointer";
+      }}
+      onPointerOut={() => {
+        document.body.style.cursor = "";
+      }}
+    >
+      {/* safety envelope on the floor */}
+      <mesh ref={safety} rotation-x={-Math.PI / 2} position-y={0.05}>
+        <ringGeometry args={[SAFETY_RADIUS - 0.12, SAFETY_RADIUS, 48]} />
+        <meshBasicMaterial color={RING_CLEAR} transparent opacity={0.14} depthWrite={false} />
+      </mesh>
+
       {/* chassis */}
-      <mesh position={[0, 0.42, 0]} castShadow receiveShadow>
+      <mesh ref={body} position={[0, 0.42, 0]} castShadow receiveShadow>
         <boxGeometry args={[1.25, 0.34, 1.85]} />
-        <meshStandardMaterial color={BODY_YELLOW} roughness={0.42} metalness={0.25} />
+        <meshStandardMaterial
+          color={color}
+          roughness={0.42}
+          metalness={0.25}
+          emissive="#f59e0b"
+          emissiveIntensity={0}
+        />
       </mesh>
       {/* lower skirt with bumpers */}
       <mesh position={[0, 0.2, 0]} castShadow>
@@ -280,6 +351,8 @@ export function Amr({ index }: { index: number }) {
       >
         {label}
       </Text>
+
+      <AmrTag index={index} />
     </group>
   );
 }

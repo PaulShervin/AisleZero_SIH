@@ -6,13 +6,15 @@ import { useSimStore } from "@/sim/store";
 import { WAREHOUSE_DEPTH, WAREHOUSE_WIDTH } from "@/sim/grid";
 import { Warehouse } from "./Warehouse";
 import { Amr } from "./Amr";
-import {
-  BlockedCells,
-  ConflictMarkers,
-  Obstacles,
-  PathLines,
-  SelectionRing,
-} from "./Overlays";
+import { BlockedCells, ConflictMarkers, Obstacles, PathLines, SelectionRing } from "./Overlays";
+import { CAMERA_FOV, CAMERA_POSITION, CAMERA_TARGET, registerCameraControls } from "./camera";
+import { CameraRig } from "./CameraRig";
+import { YieldLinks } from "./YieldLinks";
+import { StationBadges } from "./StationBadges";
+import { HeatMap } from "./HeatMap";
+import { FocusMarker } from "./FocusMarker";
+
+const AMR_COUNT = 3;
 
 function Ticker() {
   const acc = useRef(0);
@@ -29,11 +31,12 @@ function Ticker() {
 }
 
 export function SimCanvas() {
+  const cameraMode = useSimStore((s) => s.cameraMode);
   return (
     <Canvas
-      shadows
+      shadows="percentage"
       dpr={[1, 1.75]}
-      camera={{ position: [0, 36, 46], fov: 46 }}
+      camera={{ position: CAMERA_POSITION, fov: CAMERA_FOV }}
       gl={{ antialias: true }}
     >
       <color attach="background" args={["#141820"]} />
@@ -75,14 +78,18 @@ export function SimCanvas() {
 
       <Suspense fallback={null}>
         <Warehouse />
-        <Amr index={0} />
-        <Amr index={1} />
-        <Amr index={2} />
+        {Array.from({ length: AMR_COUNT }).map((_, i) => (
+          <Amr key={i} index={i} />
+        ))}
         <Obstacles />
         <BlockedCells />
+        <HeatMap />
         <PathLines />
+        <YieldLinks count={AMR_COUNT} />
+        <StationBadges />
         <ConflictMarkers />
         <SelectionRing />
+        <FocusMarker />
         <ContactShadows
           position={[0, 0.02, 0]}
           scale={Math.max(WAREHOUSE_WIDTH, WAREHOUSE_DEPTH)}
@@ -94,9 +101,12 @@ export function SimCanvas() {
       </Suspense>
 
       <Ticker />
+      <CameraRig />
       <OrbitControls
+        ref={registerCameraControls}
         makeDefault
-        target={[0, 1, 0]}
+        enabled={cameraMode === "overview"}
+        target={CAMERA_TARGET}
         minDistance={6}
         maxDistance={145}
         maxPolarAngle={Math.PI / 2.08}

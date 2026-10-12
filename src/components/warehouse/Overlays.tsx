@@ -6,9 +6,7 @@ import { CELL, GRID_H, GRID_W, gridToWorld } from "@/sim/grid";
 import { getSim } from "@/sim/engine";
 import { useSimStore } from "@/sim/store";
 import type { ConflictRecord, Robot } from "@/sim/types";
-
-const ROBOT_COLORS = ["#ffb300", "#ff6b35", "#ffd166"];
-const PATH_COLORS = ["#38bdf8", "#a3e635", "#f472b6"];
+import { amrColor } from "@/sim/palette";
 
 export function PathLines() {
   const snap = useSimStore((s) => s.snap);
@@ -31,7 +29,7 @@ export function PathLines() {
         if (pts.length < 2) return null;
         const dest = pts[pts.length - 1];
         if (!dest) return null;
-        const pathColor = PATH_COLORS[i] ?? "#38bdf8";
+        const pathColor = amrColor(i);
         return (
           <group key={r.id}>
             <Line points={pts} color={pathColor} lineWidth={3} dashed dashSize={0.5} gapSize={0.3} />
@@ -92,7 +90,7 @@ function ObstacleMesh({ id, kind }: { id: string; kind: "worker" | "pallet" }) {
       0,
       (o.pos.y - (GRID_H - 1) / 2) * CELL,
     );
-    g.rotation.y = Math.atan2(o.dir.x, -o.dir.y);
+    g.rotation.y = -Math.atan2(o.dir.x, -o.dir.y);
   });
 
   if (kind === "worker") {
@@ -211,12 +209,12 @@ function ConflictZoneMarker({ conflict }: { conflict: ConflictRecord }) {
       )}
 
       {/* 3D Floating Industrial Status Badge */}
-      <Html position={[0, 2.8, 0]} center distanceFactor={28} style={{ pointerEvents: "none" }}>
+      <Html position={[0, 2.8, 0]} center style={{ pointerEvents: "none" }}>
         <div className="flex flex-col items-center gap-1 min-w-[270px] select-none pointer-events-none">
           {!isResolved ? (
             <>
-              <div className="flex items-center gap-1.5 rounded-full border border-rose-500/80 bg-rose-950/90 px-3 py-1 shadow-xl shadow-rose-950/70 backdrop-blur-md animate-pulse">
-                <span className="h-2 w-2 rounded-full bg-rose-400 animate-ping" />
+              <div className="flex items-center gap-1.5 rounded-full border border-rose-500/80 bg-rose-950/90 px-3 py-1 shadow-xl shadow-rose-950/70 backdrop-blur-md animate-pulse motion-reduce:animate-none">
+                <span className="h-2 w-2 rounded-full bg-rose-400 animate-ping motion-reduce:animate-none" />
                 <span className="font-mono text-[11px] font-black tracking-wider text-rose-200">
                   ⚠️ COLLISION RED ZONE
                 </span>
@@ -267,9 +265,9 @@ function LidarAvoidanceMarker({ robot }: { robot: Robot }) {
         <ringGeometry args={[1.4, 1.55, 32]} />
         <meshBasicMaterial color="#38bdf8" transparent opacity={0.75} />
       </mesh>
-      <Html position={[0, 2.3, 0]} center distanceFactor={28} style={{ pointerEvents: "none" }}>
+      <Html position={[0, 2.3, 0]} center style={{ pointerEvents: "none" }}>
         <div className="flex items-center gap-1.5 rounded-full border border-sky-400/80 bg-sky-950/90 px-3 py-1 shadow-xl shadow-sky-950/70 backdrop-blur-md select-none pointer-events-none">
-          <span className="h-2 w-2 rounded-full bg-cyan-400 animate-ping" />
+          <span className="h-2 w-2 rounded-full bg-cyan-400 animate-ping motion-reduce:animate-none" />
           <span className="font-mono text-[10px] font-bold text-cyan-200">
             🚶 LiDAR DETECTION — AVOIDING OBSTACLE
           </span>
@@ -301,10 +299,10 @@ function FailedRobotMarker({ robot }: { robot: Robot }) {
         <ringGeometry args={[1.65, 1.85, 36]} />
         <meshBasicMaterial color="#ff2222" transparent opacity={0.85} />
       </mesh>
-      <Html position={[0, 2.7, 0]} center distanceFactor={28} style={{ pointerEvents: "none" }}>
+      <Html position={[0, 2.7, 0]} center style={{ pointerEvents: "none" }}>
         <div className="flex flex-col items-center gap-1 select-none pointer-events-none min-w-[240px]">
-          <div className="flex items-center gap-1.5 rounded-full border border-rose-500/90 bg-rose-950/95 px-3 py-1 shadow-xl shadow-rose-950/80 backdrop-blur-md animate-pulse">
-            <span className="h-2 w-2 rounded-full bg-rose-400 animate-ping" />
+          <div className="flex items-center gap-1.5 rounded-full border border-rose-500/90 bg-rose-950/95 px-3 py-1 shadow-xl shadow-rose-950/80 backdrop-blur-md animate-pulse motion-reduce:animate-none">
+            <span className="h-2 w-2 rounded-full bg-rose-400 animate-ping motion-reduce:animate-none" />
             <span className="font-mono text-[11px] font-black tracking-wider text-rose-200">
               🛑 {robot.name} E-STOP: FAULT ISOLATED
             </span>
@@ -322,9 +320,9 @@ function ReallocatedTaskMarker({ robot, taskId }: { robot: Robot; taskId: string
   const [x, z] = gridToWorld(robot.pos.x, robot.pos.y);
   return (
     <group position={[x, 0, z]}>
-      <Html position={[0, 2.4, 0]} center distanceFactor={28} style={{ pointerEvents: "none" }}>
+      <Html position={[0, 2.4, 0]} center style={{ pointerEvents: "none" }}>
         <div className="flex items-center gap-1.5 rounded-full border border-amber-500/90 bg-[#161a23]/95 px-3 py-1 shadow-xl shadow-amber-950/70 backdrop-blur-md select-none pointer-events-none">
-          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse motion-reduce:animate-none" />
           <span className="font-mono text-[10px] font-bold text-amber-300">
             ⚡ REALLOCATED MISSION ({taskId}) → {robot.name}
           </span>
@@ -374,6 +372,7 @@ export function SelectionRing() {
   useFrame(({ clock }) => {
     const m = ref.current;
     if (!m) return;
+    (m.material as THREE.MeshBasicMaterial).color.set(index >= 0 ? amrColor(index) : "#ffffff");
     if (index < 0) {
       m.visible = false;
       return;
@@ -392,7 +391,11 @@ export function SelectionRing() {
   return (
     <mesh ref={ref} rotation-x={-Math.PI / 2} visible={false}>
       <ringGeometry args={[1.05, 1.3, 40]} />
-      <meshBasicMaterial color={ROBOT_COLORS[0] ?? "#ffb300"} transparent opacity={0.85} />
+      <meshBasicMaterial
+        color={index >= 0 ? amrColor(index) : "#ffffff"}
+        transparent
+        opacity={0.85}
+      />
     </mesh>
   );
 }

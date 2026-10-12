@@ -5,9 +5,10 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * AisleZero design system — industrial control-room.
- * Steel/graphite surfaces, amber machine accent, signal colours for robot
- * status. All colours are oklch tokens; never hardcode colours in components.
+ * AisleZero design system — industrial SaaS.
+ * White / light-grey surfaces, navy text, cobalt actions and signal colours
+ * for robot / task state. All colours are oklch tokens; never hardcode
+ * colours in dashboard components.
  */
 
 @theme inline {
@@ -16,9 +17,9 @@
   --radius-lg: calc(var(--radius) + 3px);
   --radius-xl: calc(var(--radius) + 6px);
 
-  --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
-  --font-sans: "Barlow", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-display: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -45,56 +46,66 @@
   --color-panel-raised: var(--panel-raised);
   --color-hairline: var(--hairline);
   --color-signal-ok: var(--signal-ok);
+  --color-signal-ok-soft: var(--signal-ok-soft);
   --color-signal-warn: var(--signal-warn);
+  --color-signal-warn-soft: var(--signal-warn-soft);
   --color-signal-fail: var(--signal-fail);
-  --color-signal-charge: var(--signal-charge);
+  --color-signal-fail-soft: var(--signal-fail-soft);
+  --color-signal-info: var(--signal-info);
+  --color-signal-info-soft: var(--signal-info-soft);
   --color-signal-idle: var(--signal-idle);
+  --color-signal-idle-soft: var(--signal-idle-soft);
   --color-route-1: var(--route-1);
   --color-route-2: var(--route-2);
   --color-route-3: var(--route-3);
 
-  --shadow-panel: 0 18px 40px -22px oklch(0 0 0 / 0.85);
-  --shadow-glow: 0 0 0 1px oklch(0.78 0.16 72 / 0.35), 0 0 24px -6px oklch(0.78 0.16 72 / 0.35);
+  --shadow-panel: 0 1px 2px oklch(0.25 0.06 262 / 0.06), 0 1px 3px oklch(0.25 0.06 262 / 0.04);
 }
 
 :root {
-  --radius: 0.35rem;
+  --radius: 0.5rem;
 
-  --background: oklch(0.19 0.012 255);
-  --foreground: oklch(0.94 0.008 250);
-  --card: oklch(0.235 0.014 255);
-  --card-foreground: oklch(0.94 0.008 250);
-  --popover: oklch(0.235 0.014 255);
-  --popover-foreground: oklch(0.94 0.008 250);
+  --background: oklch(0.975 0.004 250);
+  --foreground: oklch(0.25 0.06 262);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.25 0.06 262);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.25 0.06 262);
 
-  --primary: oklch(0.78 0.16 72);
-  --primary-foreground: oklch(0.2 0.03 60);
-  --secondary: oklch(0.3 0.016 255);
-  --secondary-foreground: oklch(0.93 0.008 250);
-  --muted: oklch(0.28 0.014 255);
-  --muted-foreground: oklch(0.68 0.015 250);
-  --accent: oklch(0.34 0.02 250);
-  --accent-foreground: oklch(0.95 0.008 250);
-  --destructive: oklch(0.6 0.21 25);
-  --destructive-foreground: oklch(0.97 0.01 250);
+  --primary: oklch(0.52 0.2 262);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.006 250);
+  --secondary-foreground: oklch(0.3 0.05 262);
+  --muted: oklch(0.955 0.006 250);
+  --muted-foreground: oklch(0.52 0.025 260);
+  --accent: oklch(0.945 0.02 262);
+  --accent-foreground: oklch(0.3 0.08 262);
+  --destructive: oklch(0.55 0.2 27);
+  --destructive-foreground: oklch(0.99 0 0);
 
-  --border: oklch(0.33 0.014 255);
-  --input: oklch(0.33 0.014 255);
-  --ring: oklch(0.78 0.16 72);
+  --border: oklch(0.9 0.008 250);
+  --input: oklch(0.88 0.01 250);
+  --ring: oklch(0.52 0.2 262);
 
-  --panel: oklch(0.225 0.013 255 / 0.92);
-  --panel-raised: oklch(0.28 0.015 255);
-  --hairline: oklch(0.4 0.016 255 / 0.55);
+  --panel: oklch(1 0 0);
+  --panel-raised: oklch(0.975 0.004 250);
+  --hairline: oklch(0.9 0.008 250);
 
-  --signal-ok: oklch(0.79 0.17 158);
-  --signal-warn: oklch(0.85 0.16 88);
-  --signal-fail: oklch(0.67 0.2 22);
-  --signal-charge: oklch(0.75 0.14 235);
-  --signal-idle: oklch(0.72 0.012 250);
+  --signal-ok: oklch(0.58 0.15 155);
+  --signal-ok-soft: oklch(0.95 0.04 155);
+  --signal-warn: oklch(0.7 0.16 70);
+  --signal-warn-soft: oklch(0.96 0.05 85);
+  --signal-fail: oklch(0.55 0.2 27);
+  --signal-fail-soft: oklch(0.95 0.04 27);
+  --signal-info: oklch(0.52 0.2 262);
+  --signal-info-soft: oklch(0.94 0.03 262);
+  --signal-idle: oklch(0.55 0.02 260);
+  --signal-idle-soft: oklch(0.94 0.006 250);
 
-  --route-1: oklch(0.78 0.14 232);
-  --route-2: oklch(0.83 0.18 128);
-  --route-3: oklch(0.76 0.17 350);
+  /* Match PATH_COLORS in components/warehouse/Overlays.tsx */
+  --route-1: #38bdf8;
+  --route-2: #a3e635;
+  --route-3: #f472b6;
 }
 
 @layer base {
@@ -113,7 +124,7 @@
   h2,
   h3 {
     font-family: var(--font-display);
-    letter-spacing: 0.02em;
+    letter-spacing: -0.01em;
   }
 }
 
@@ -121,14 +132,13 @@
   background-color: var(--color-panel);
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-lg);
-  backdrop-filter: blur(10px);
   box-shadow: var(--shadow-panel);
 }
 
 @utility label-xs {
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
-  letter-spacing: 0.14em;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-muted-foreground);
 }

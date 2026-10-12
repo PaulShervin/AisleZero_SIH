@@ -30,6 +30,15 @@ const BATTERY_CHARGE = 9; // % per second on a charger
 const LOW_BATTERY = 18;
 const HANDLE_TIME = 1.1; // seconds spent picking / dropping
 const YIELD_REPLAN_AFTER = 2.6;
+/** Fixed simulation step so behaviour is identical at 1x and 8x playback. */
+const FIXED_DT = 1 / 60;
+const MAX_SUBSTEPS = 240;
+/** Another AMR closer than this (in cells) and ahead of us makes us hold. */
+export const SAFE_GAP = 1.35;
+/** Even a robot with right of way stops this close to an oncoming AMR. */
+const HARD_GAP = 0.95;
+/** Safety margin on the estimated battery cost of a trip. */
+const TRIP_BATTERY_MARGIN = 1.2;
 
 const START_CELLS: Vec2[] = [
   { x: 2, y: 19 },
@@ -72,6 +81,11 @@ export class Simulation {
   private handleTimers = new Map<string, number>();
   private scripts: ScriptStep[] = [];
   private allocTimer = 0;
+  private accumulator = 0;
+  /** Which AMR each waiting AMR is holding for (used to spot deadlock rings). */
+  private waitingFor = new Map<string, string>();
+  /** Drive-through count per cell, for the traffic heat map. */
+  private visits = new Map<string, number>();
   version = 0;
 
   constructor() {
@@ -104,6 +118,8 @@ export class Simulation {
       reroutes: 0,
       conflicts: 0,
       lastEvent: "Standing by",
+      holdingFor: null,
+      sensing: false,
     };
   }
 
@@ -117,6 +133,9 @@ export class Simulation {
     this.events = [];
     this.conflicts = [];
     this.handleTimers.clear();
+    this.waitingFor.clear();
+    this.visits.clear();
+    this.accumulator = 0;
     this.scripts = [];
     this.allocTimer = 0;
     taskSeq = 0;
@@ -403,6 +422,7 @@ export class Simulation {
       assignedTo: null,
       reassignments: 0,
       createdAt: this.time,
+      allocation: null,
     };
     this.tasks.push(task);
     this.log(
@@ -540,7 +560,17 @@ export class Simulation {
 
   step(rawDt: number) {
     if (!this.running) return;
-    const dt = Math.min(rawDt, 0.05) * this.speed;
+    this.accumulator += Math.min(rawDt, 0.1) * this.speed;
+    let substeps = 0;
+    while (this.accumulator >= FIXED_DT && substeps < MAX_SUBSTEPS) {
+      this.accumulator -= FIXED_DT;
+      substeps += 1;
+      this.tick(FIXED_DT);
+    }
+    if (substeps >= MAX_SUBSTEPS) this.accumulator = 0;
+  }
+
+  private tick(dt: number) {
     this.time += dt;
 
     for (const s of this.scripts) {
@@ -597,24 +627,49 @@ export class Simulation {
 
     for (const task of pending) {
       const candidates = this.robots.filter(
-        (r) => r.status !== "failed" && r.status !== "charging" && r.taskId === null && r.battery > LOW_BATTERY,
+        (r) =>
+          r.status !== "failed" &&
+          r.status !== "charging" &&
+          r.taskId === null &&
+          this.canAfford(r, task),
       );
-      if (candidates.length === 0) return;
+      if (candidates.length === 0) continue;
 
       let best: Robot | null = null;
       let bestScore = Infinity;
       let bestBreakdown = "";
+      let bestDecision: Task["allocation"] = null;
+      const scored: Array<{ robotId: string; score: number }> = [];
       for (const r of candidates) {
         const dist = manhattan({ x: Math.round(r.pos.x), y: Math.round(r.pos.y) }, task.pickup);
         const workload = this.tasks.filter((t) => t.assignedTo === r.id && t.status !== "done").length;
         const score = dist * 1 + (100 - r.battery) * 0.12 + workload * 9 - task.urgency * 5;
+        scored.push({ robotId: r.id, score });
         if (score < bestScore) {
           bestScore = score;
           best = r;
           bestBreakdown = `dist ${dist}, battery ${Math.round(r.battery)}%, load ${workload}`;
+          bestDecision = {
+            robotId: r.id,
+            score,
+            dist,
+            battery: Math.round(r.battery),
+            load: workload,
+            urgency: task.urgency,
+            alternatives: [],
+            t: this.time,
+          };
         }
       }
       if (!best) return;
+      if (bestDecision) {
+        task.allocation = {
+          ...bestDecision,
+          alternatives: scored
+            .filter((s) => s.robotId !== best!.id)
+            .sort((a, b) => a.score - b.score),
+        };
+      }
 
       task.status = "assigned";
       task.assignedTo = best.id;
@@ -633,10 +688,23 @@ export class Simulation {
     this.version++;
   }
 
+  /** True if the robot can finish the whole task and still keep its reserve charge. */
+  private canAfford(r: Robot, task: Task): boolean {
+    const here = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
+    const cells = manhattan(here, task.pickup) + manhattan(task.pickup, task.dropoff);
+    const needed = cells * TRIP_BATTERY_MARGIN * (BATTERY_DRAIN / ROBOT_SPEED);
+    return r.battery - needed >= LOW_BATTERY;
+  }
+
+  private chargerFor(r: Robot): Vec2 {
+    return CHARGERS[Number(r.id.slice(1)) - 1] ?? CHARGERS[0]!;
+  }
+
   /* -------------------------------------------------------------- navigation */
 
-  private dynamicBlocks(self: Robot): Set<string> {
+  private dynamicBlocks(self: Robot, extra?: Vec2): Set<string> {
     const set = new Set(this.blocked);
+    if (extra) set.add(key(extra.x, extra.y));
     for (const o of this.obstacles) {
       set.add(key(Math.round(o.pos.x), Math.round(o.pos.y)));
     }
@@ -648,6 +716,8 @@ export class Simulation {
   }
 
   private setDestination(r: Robot, dest: Vec2, status: Robot["status"]) {
+    this.waitingFor.delete(r.id);
+    r.holdingFor = null;
     r.dest = { ...dest };
     r.status = status;
     const start = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
@@ -659,11 +729,11 @@ export class Simulation {
     }
   }
 
-  private replan(r: Robot, reason: string) {
+  private replan(r: Robot, reason: string, extraBlock?: Vec2) {
     if (!r.dest) return;
     const before = r.path.length;
     const start = { x: Math.round(r.pos.x), y: Math.round(r.pos.y) };
-    const path = aStar(start, r.dest, this.dynamicBlocks(r));
+    const path = aStar(start, r.dest, this.dynamicBlocks(r, extraBlock));
     if (path.length === 0) {
       r.lastEvent = `Blocked (${reason}) — waiting`;
       r.status = "waiting";
@@ -797,7 +867,7 @@ export class Simulation {
       yielding.path = bestSidePath;
       yielding.pathIndex = 0;
       yielding.reroutes += 1;
-      yielding.status = "avoiding";
+      if (yielding.status !== "charging") yielding.status = "avoiding";
       yielding.waitTimer = 0;
       const firstHop = bestSidePath[0]!;
       yielding.lastEvent = `Yielding to ${proceeding.name} — side path via (${firstHop.x}, ${firstHop.y})`;
@@ -905,9 +975,9 @@ export class Simulation {
       return;
     }
 
-    // Low battery: abandon task, head to a charger.
-    if (r.battery <= LOW_BATTERY && r.taskId === null) {
-      const charger = CHARGERS[Number(r.id.slice(1)) - 1]! ?? CHARGERS[0]!;
+    // Low battery, or too low for any waiting task: head to a charger.
+    if (r.taskId === null && !this.handleTimers.has(r.id) && this.needsCharge(r)) {
+      const charger = this.chargerFor(r);
       this.setDestination(r, charger, "charging");
       r.lastEvent = "Low battery — docking";
       this.log("battery", `${r.name} battery ${Math.round(r.battery)}% — heading to charger`);
@@ -931,6 +1001,11 @@ export class Simulation {
       r.path = [];
       r.dest = null;
     }
+    if (r.taskId === null) {
+      this.waitingFor.delete(r.id);
+      r.holdingFor = null;
+      r.sensing = false;
+    }
 
     if (r.taskId === null) {
       r.lastEvent = r.lastEvent === "Standing by" ? r.lastEvent : "Idle — awaiting task";
@@ -945,10 +1020,128 @@ export class Simulation {
     this.drive(r, dt);
   }
 
+  private needsCharge(r: Robot): boolean {
+    if (r.battery <= LOW_BATTERY) return true;
+    const pending = this.tasks.filter((t) => t.status === "pending");
+    return pending.length > 0 && !pending.some((t) => this.canAfford(r, t));
+  }
+
+  private isMoving(o: Robot): boolean {
+    return (
+      o.status !== "failed" &&
+      o.status !== "waiting" &&
+      o.status !== "idle" &&
+      !this.handleTimers.has(o.id) &&
+      o.pathIndex < o.path.length
+    );
+  }
+
+  /** Nearest AMR within SAFE_GAP that is in front of `r` as it heads for `next`. */
+  private robotAhead(r: Robot, next: Vec2): Robot | null {
+    const hx = next.x - r.pos.x;
+    const hy = next.y - r.pos.y;
+    const hl = Math.hypot(hx, hy);
+    if (hl < 1e-6) return null;
+    let best: Robot | null = null;
+    let bestD = SAFE_GAP;
+    for (const o of this.robots) {
+      if (o.id === r.id || o.status === "failed") continue;
+      const ox = o.pos.x - r.pos.x;
+      const oy = o.pos.y - r.pos.y;
+      const d = Math.hypot(ox, oy);
+      if (d >= bestD) continue;
+      const cosAngle = d < 0.3 ? 1 : (ox * hx + oy * hy) / (d * hl);
+      if (cosAngle <= 0.3) continue;
+      best = o;
+      bestD = d;
+    }
+    return best;
+  }
+
+  /**
+   * Keeps AMRs from driving through each other. Returns true when `r` must hold
+   * this tick. Oncoming robots resolve by priority: the lower one sidesteps.
+   */
+  private holdForRobotAhead(r: Robot, ahead: Robot, dt: number): boolean {
+    const aheadMoving = this.isMoving(ahead);
+    const aheadNext = ahead.path[ahead.pathIndex];
+    const headOn =
+      aheadMoving &&
+      aheadNext !== undefined &&
+      (aheadNext.x - ahead.pos.x) * (r.pos.x - ahead.pos.x) +
+        (aheadNext.y - ahead.pos.y) * (r.pos.y - ahead.pos.y) >
+        0;
+    const gap = Math.hypot(ahead.pos.x - r.pos.x, ahead.pos.y - r.pos.y);
+    if (headOn && gap >= HARD_GAP && this.priority(r) > this.priority(ahead)) return false;
+
+    // A robot on its way to dock keeps its charging state while it holds.
+    if (r.status !== "charging") r.status = "waiting";
+    r.waitTimer += dt;
+    r.lastEvent = `Holding for ${ahead.name}`;
+    this.waitingFor.set(r.id, ahead.id);
+    r.holdingFor = ahead.id;
+
+    const aheadCell = { x: Math.round(ahead.pos.x), y: Math.round(ahead.pos.y) };
+    const ring = this.waitRing(r);
+    if (ring && ring.every((o) => o.id === r.id || this.priority(o) > this.priority(r))) {
+      // Everyone in the ring is waiting on someone else: the lowest priority AMR backs off.
+      r.waitTimer = 0;
+      this.log("conflict", `${r.name} breaking a traffic deadlock with ${ahead.name}`);
+      if (!this.takeSidePath(r, ahead)) this.replan(r, "traffic deadlock", aheadCell);
+      return true;
+    }
+
+    if (!aheadMoving) {
+      if (ahead.status === "idle" && ahead.taskId === null && !this.handleTimers.has(ahead.id)) {
+        this.parkAtCharger(ahead, aheadCell);
+      } else if (r.waitTimer > 1) {
+        r.waitTimer = 0;
+        this.replan(r, `${ahead.name} stopped ahead`, aheadCell);
+      }
+    } else if (headOn && r.waitTimer > 1.2) {
+      r.waitTimer = 0;
+      this.takeSidePath(r, ahead);
+    }
+    return true;
+  }
+
+  /** The AMRs in a circular wait that includes `r`, or null if there is none. */
+  private waitRing(r: Robot): Robot[] | null {
+    const ring: Robot[] = [r];
+    let nextId = this.waitingFor.get(r.id);
+    while (nextId !== undefined) {
+      if (nextId === r.id) return ring;
+      const o = this.robots.find((x) => x.id === nextId);
+      if (!o || !this.waitingFor.has(o.id) || ring.includes(o)) return null;
+      ring.push(o);
+      nextId = this.waitingFor.get(o.id);
+    }
+    return null;
+  }
+
+  /** An idle AMR blocking a lane returns to its dock instead of sitting in traffic. */
+  private parkAtCharger(o: Robot, at: Vec2) {
+    const dock = this.chargerFor(o);
+    if (dock.x === at.x && dock.y === at.y) return;
+    this.setDestination(o, dock, "charging");
+    o.lastEvent = "Clearing lane — returning to dock";
+    this.log("info", `${o.name} idle in a busy lane — returning to its dock`);
+    this.version++;
+  }
+
   private drive(r: Robot, dt: number) {
     const next = r.path[r.pathIndex]!;
     if (!next) {
       this.arrive(r);
+      return;
+    }
+
+    r.sensing = false;
+
+    if (r.battery <= 0 && r.status !== "charging") {
+      this.failRobot(r.id);
+      r.lastEvent = "Battery depleted — stopped";
+      this.log("battery", `${r.name} ran out of battery and stopped`);
       return;
     }
 
@@ -957,6 +1150,7 @@ export class Simulation {
       (other) => other.status === "failed" && Math.hypot(other.pos.x - next.x, other.pos.y - next.y) < 0.95,
     );
     if (failedBlocker) {
+      r.sensing = true;
       r.status = "avoiding";
       r.lastEvent = `Disabled ${failedBlocker.name} ahead — routing around`;
       this.replan(r, `disabled ${failedBlocker.name}`);
@@ -965,6 +1159,7 @@ export class Simulation {
 
     // LiDAR-style forward check for dynamic obstacles.
     if (this.obstacleAt(next, 0.75)) {
+      r.sensing = true;
       r.status = "avoiding";
       r.waitTimer += dt;
       r.lastEvent = `Obstacle ahead at ${cellName(next)} — avoiding`;
@@ -996,6 +1191,9 @@ export class Simulation {
             r.status = "waiting";
             r.waitTimer += dt;
             r.lastEvent = `Waiting for ${blocker.name} to vacate corridor`;
+            this.waitingFor.set(r.id, blocker.id);
+            r.holdingFor = blocker.id;
+            r.sensing = true;
             return;
           }
           // Lane is clear or blocker is stepping aside: continue forward!
@@ -1013,6 +1211,9 @@ export class Simulation {
           r.status = "waiting";
           r.waitTimer += dt;
           r.lastEvent = `Holding for ${blocker.name}`;
+          this.waitingFor.set(r.id, blocker.id);
+          r.holdingFor = blocker.id;
+          r.sensing = true;
           if (r.waitTimer > 1.5) {
             r.waitTimer = 0;
             this.replan(r, "traffic clearance");
@@ -1021,6 +1222,16 @@ export class Simulation {
         }
       }
     }
+
+    if (this.scenario !== 4) {
+      const ahead = this.robotAhead(r, next);
+      if (ahead) {
+        r.sensing = true;
+        if (this.holdForRobotAhead(r, ahead, dt)) return;
+      }
+    }
+    this.waitingFor.delete(r.id);
+    r.holdingFor = null;
 
     if (r.waitTimer > 0) {
       r.waitTimer = 0;
@@ -1037,6 +1248,8 @@ export class Simulation {
       r.pos.x = next.x;
       r.pos.y = next.y;
       r.pathIndex += 1;
+      const k = key(next.x, next.y);
+      this.visits.set(k, (this.visits.get(k) ?? 0) + 1);
       if (r.pathIndex >= r.path.length) this.arrive(r);
       return;
     }
@@ -1094,16 +1307,33 @@ export class Simulation {
       r.taskId = null;
       r.status = "idle";
       r.lastEvent = `Delivered ${task.id}`;
-      this.log("delivery", `${r.name} delivered ${task.id} at ${cellName(task.dropoff)}`);
+      this.log("delivery", `${r.name} delivered ${task.id} at ${cellName(task.dropoff)}`, {
+        cell: task.dropoff,
+        robotId: r.id,
+      });
     }
     this.version++;
   }
 
   /* ------------------------------------------------------------------ output */
 
-  log(kind: SimEvent["kind"], message: string) {
+  log(kind: SimEvent["kind"], message: string, where?: { cell?: Vec2; robotId?: string }) {
     eventSeq += 1;
-    this.events.unshift({ id: eventSeq, t: this.time, kind, message });
+    const robot = where?.robotId
+      ? this.robots.find((r) => r.id === where.robotId)
+      : this.robots.find((r) => message.includes(r.name));
+    const robotCell = robot
+      ? { x: Math.round(robot.pos.x), y: Math.round(robot.pos.y) }
+      : undefined;
+    const cell = where?.cell ?? robotCell;
+    this.events.unshift({
+      id: eventSeq,
+      t: this.time,
+      kind,
+      message,
+      ...(robot ? { robotId: robot.id } : {}),
+      ...(cell ? { cell } : {}),
+    });
     if (this.events.length > 120) this.events.length = 120;
   }
 
@@ -1450,13 +1680,18 @@ export class Simulation {
       time: this.time,
       running: this.running,
       scenario: this.scenario,
-      robots: this.robots.map((r) => ({ ...r, pos: { ...r.pos }, path: r.path })),
+      robots: this.robots.map((r) => ({
+        ...r,
+        pos: { ...r.pos },
+        path: r.path,
+      })),
       tasks: this.tasks.map((t) => ({ ...t })),
       obstacles: this.obstacles.map((o) => ({ ...o, pos: { ...o.pos } })),
       blockedCells: [...this.blocked],
       events: this.events.slice(0, 40),
       conflicts: this.conflicts.map((c) => ({ ...c })),
       narrative: this.getScenarioNarrative(),
+      heat: Object.fromEntries(this.visits),
     };
   }
 }
